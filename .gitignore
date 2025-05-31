@@ -185,3 +185,6 @@ docs
 
 # direnv
 .direnv
+
+*.d.ts
+*.d.ts.map
