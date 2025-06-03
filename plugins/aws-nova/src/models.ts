@@ -1,4 +1,3 @@
-
 export const NOVA_MODELS = {
   'nova-pro': {
     name: 'AWS Nova Pro',

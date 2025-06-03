@@ -1,14 +1,12 @@
 // SPDX-FileCopyrightText: 2024 LiveKit, Inc.
 //
 // SPDX-License-Identifier: Apache-2.0
+import type { InvokeModelWithBidirectionalStreamInput } from '@aws-sdk/client-bedrock-runtime';
 import {
   BedrockRuntimeClient,
+  InvokeModelWithBidirectionalStreamCommand,
   InvokeModelWithResponseStreamCommand,
 } from '@aws-sdk/client-bedrock-runtime';
-import {
-  StartStreamTranscriptionCommand,
-  TranscribeStreamingClient,
-} from '@aws-sdk/client-transcribe-streaming';
 import type { AsyncIterableQueue, Future } from '@livekit/agents';
 import { Queue, llm, log, mergeFrames, multimodal } from '@livekit/agents';
 import { AudioFrame } from '@livekit/rtc-node';
@@ -396,7 +394,6 @@ export class RealtimeSession extends multimodal.RealtimeSession {
   #inputAudioBuffer: InputAudioBuffer;
   #response: Response;
   #bedrockClient?: BedrockRuntimeClient;
-  #transcribeClient?: TranscribeStreamingClient;
   #logger = log();
   #sendQueue = new Queue<api_proto.ClientEvent>();
 
@@ -487,47 +484,39 @@ export class RealtimeSession extends multimodal.RealtimeSession {
       },
     });
 
-    this.#transcribeClient = new TranscribeStreamingClient({
-      region: this.#opts.region,
-      credentials: {
-        accessKeyId: this.#opts.accessKeyId || '',
-        secretAccessKey: this.#opts.secretAccessKey || '',
-      },
-    });
+    this.#logger.info({ bedrockClient: this.#bedrockClient }, 'bedrock client initialized');
+
+    const response = await this.#bedrockClient.send(
+      new InvokeModelWithBidirectionalStreamCommand({
+        modelId: this.#opts.model,
+        body: this.#inputStream(),
+      }),
+    );
+    this.#logger.info({ bedrockClient: this.#bedrockClient, response }, 'Bidi stream command');
   }
 
-  async processAudio(audioData: Buffer): Promise<void> {
-    if (!this.#transcribeClient) {
-      throw new Error('Transcribe client not initialized');
-    }
-
-    try {
-      const command = new StartStreamTranscriptionCommand({
-        LanguageCode: 'en-US',
-        MediaEncoding: 'pcm',
-        MediaSampleRateHertz: api_proto.SAMPLE_RATE,
-        AudioStream: (async function* () {
+  async *#inputStream(): AsyncIterable<InvokeModelWithBidirectionalStreamInput> {
+    while (true) {
+      try {
+        const event = await this.#sendQueue.get();
+        switch (event.type) {
+          case 'input_audio_buffer.append':
+            this.#logger.debug(`-> ${JSON.stringify(event)}`);
+            yield {
+              AudioEvent: {
+                AudioChunk: event.audio,
+              },
+        if (event.type === 'input_audio_buffer.append') {
+          this.#logger.debug(`-> ${JSON.stringify(event)}`);
           yield {
             AudioEvent: {
-              AudioChunk: audioData,
+              AudioChunk: event.audio,
             },
           };
-        })(),
-      });
-
-      const response = await this.#transcribeClient.send(command);
-      if (response.TranscriptResultStream) {
-        for await (const event of response.TranscriptResultStream) {
-          if (event.TranscriptEvent?.Transcript?.Results?.[0]?.Alternatives?.[0]?.Transcript) {
-            const transcript =
-              event.TranscriptEvent.Transcript.Results[0].Alternatives[0].Transcript;
-            this.emit('transcription', { transcript });
-          }
         }
+      } catch (error) {
+        this.#logger.error('Error sending event:', error);
       }
-    } catch (error) {
-      this.#logger.error('Error processing audio:', error);
-      throw error;
     }
   }
 
@@ -564,9 +553,6 @@ export class RealtimeSession extends multimodal.RealtimeSession {
   async close() {
     if (this.#bedrockClient) {
       this.#bedrockClient.destroy();
-    }
-    if (this.#transcribeClient) {
-      this.#transcribeClient.destroy();
     }
   }
 }

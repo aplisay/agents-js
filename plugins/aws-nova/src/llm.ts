@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2024 LiveKit, Inc.
 //
 // SPDX-License-Identifier: Apache-2.0
+import type { InvokeModelWithBidirectionalStreamInput } from '@aws-sdk/client-bedrock-runtime';
 import {
   BedrockRuntimeClient,
   InvokeModelWithBidirectionalStreamCommand,
-  InvokeModelWithBidirectionalStreamInput,
 } from '@aws-sdk/client-bedrock-runtime';
 import { llm } from '@livekit/agents';
 import type { NovaModel } from './models.js';
@@ -151,24 +151,27 @@ export class NovaLLMStream extends llm.LLMStream {
     }
   }
 
-  #createInputStream(messages: { role: string; content: string }[]): AsyncIterable<InvokeModelWithBidirectionalStreamInput> {
-    const self = this;
+  #createInputStream(
+    messages: { role: string; content: string }[],
+  ): AsyncIterable<InvokeModelWithBidirectionalStreamInput> {
     return {
       async *[Symbol.asyncIterator]() {
         // Send initialization event
         yield {
           chunk: {
-            bytes: new TextEncoder().encode(JSON.stringify({
-              event: {
-                sessionStart: {
-                  inferenceConfiguration: {
-                    maxTokens: self.#opts.maxTokens,
-                    topP: self.#opts.topP,
-                    temperature: self.#temperature ?? self.#opts.temperature,
+            bytes: new TextEncoder().encode(
+              JSON.stringify({
+                event: {
+                  sessionStart: {
+                    inferenceConfiguration: {
+                      maxTokens: this.#opts.maxTokens,
+                      topP: this.#opts.topP,
+                      temperature: this.#temperature ?? this.#opts.temperature,
+                    },
                   },
                 },
-              },
-            })),
+              }),
+            ),
           },
         };
 
@@ -176,14 +179,16 @@ export class NovaLLMStream extends llm.LLMStream {
         for (const msg of messages) {
           yield {
             chunk: {
-              bytes: new TextEncoder().encode(JSON.stringify({
-                event: {
-                  message: {
-                    role: msg.role,
-                    content: msg.content,
+              bytes: new TextEncoder().encode(
+                JSON.stringify({
+                  event: {
+                    message: {
+                      role: msg.role,
+                      content: msg.content,
+                    },
                   },
-                },
-              })),
+                }),
+              ),
             },
           };
         }
