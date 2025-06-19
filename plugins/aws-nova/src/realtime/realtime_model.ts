@@ -499,20 +499,15 @@ export class RealtimeSession extends multimodal.RealtimeSession {
     while (true) {
       try {
         const event = await this.#sendQueue.get();
-        switch (event.type) {
-          case 'input_audio_buffer.append':
-            this.#logger.debug(`-> ${JSON.stringify(event)}`);
-            yield {
-              AudioEvent: {
-                AudioChunk: event.audio,
-              },
         if (event.type === 'input_audio_buffer.append') {
           this.#logger.debug(`-> ${JSON.stringify(event)}`);
+          /*
           yield {
             AudioEvent: {
               AudioChunk: event.audio,
             },
           };
+          */
         }
       } catch (error) {
         this.#logger.error('Error sending event:', error);
