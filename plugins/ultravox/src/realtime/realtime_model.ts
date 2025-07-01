@@ -314,56 +314,6 @@ export class RealtimeModel extends multimodal.RealtimeModel {
   #defaultOpts: ModelOptions;
   #sessions: RealtimeSession[] = [];
 
-  static withAzure({
-    baseURL,
-    azureDeployment,
-    apiVersion = '2024-10-01-preview',
-    apiKey = undefined,
-    entraToken = undefined,
-    instructions = '',
-    modalities = ['text', 'audio'],
-    voice = 'alloy',
-    inputAudioFormat = 'pcm16',
-    outputAudioFormat = 'pcm16',
-    inputAudioTranscription = { model: 'whisper-1' },
-    turnDetection = { type: 'server_vad' },
-    temperature = 0.8,
-    maxResponseOutputTokens = Infinity,
-  }: {
-    baseURL: string;
-    azureDeployment: string;
-    apiVersion?: string;
-    apiKey?: string;
-    entraToken?: string;
-    instructions?: string;
-    modalities?: ['text', 'audio'] | ['text'];
-    voice?: api_proto.Voice;
-    inputAudioFormat?: api_proto.AudioFormat;
-    outputAudioFormat?: api_proto.AudioFormat;
-    inputAudioTranscription?: api_proto.InputAudioTranscription;
-    turnDetection?: api_proto.TurnDetectionType;
-    temperature?: number;
-    maxResponseOutputTokens?: number;
-  }) {
-    return new RealtimeModel({
-      isAzure: true,
-      baseURL: new URL('openai', baseURL).toString(),
-      model: azureDeployment,
-      apiVersion,
-      apiKey,
-      entraToken,
-      instructions,
-      modalities,
-      voice,
-      inputAudioFormat,
-      outputAudioFormat,
-      inputAudioTranscription,
-      turnDetection,
-      temperature,
-      maxResponseOutputTokens,
-    });
-  }
-
   constructor({
     modalities = ['text', 'audio'],
     instructions = '',
@@ -400,7 +350,7 @@ export class RealtimeModel extends multimodal.RealtimeModel {
   }) {
     super();
 
-    if (apiKey === '' && !(isAzure && entraToken)) {
+    if (apiKey === '') {
       throw new Error(
         'OpenAI API key is required, either using the argument or by setting the OPENAI_API_KEY environmental variable',
       );
