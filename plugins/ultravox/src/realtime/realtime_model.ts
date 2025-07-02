@@ -1,22 +1,30 @@
 // SPDX-FileCopyrightText: 2024 LiveKit, Inc.
 //
 // SPDX-License-Identifier: Apache-2.0
-import { AsyncIterableQueue, Future, Queue, llm, log, multimodal } from '@livekit/agents';
+import {
+  AsyncIterableQueue,
+  AudioByteStream,
+  Future,
+  Queue,
+  llm,
+  log,
+  multimodal,
+} from '@livekit/agents';
 import { AudioFrame } from '@livekit/rtc-node';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
-import * as ultravox_proto from './api_proto.js';
+import * as api_proto from './api_proto.js';
 import { UltravoxClient } from './ultravox_client.js';
 
 interface ModelOptions {
   modalities: ['text', 'audio'] | ['text'];
   instructions: string;
-  voice?: ultravox_proto.Voice;
-  inputAudioFormat: ultravox_proto.AudioFormat;
-  outputAudioFormat: ultravox_proto.AudioFormat;
+  voice?: api_proto.Voice;
+  inputAudioFormat: api_proto.AudioFormat;
+  outputAudioFormat: api_proto.AudioFormat;
   temperature: number;
   maxResponseOutputTokens: number;
-  model: ultravox_proto.Model;
+  model: api_proto.Model;
   apiKey: string;
   baseURL: string;
   maxDuration: string;
@@ -27,9 +35,9 @@ interface ModelOptions {
 
 export interface RealtimeResponse {
   id: string;
-  status: 'completed' | 'failed' | 'cancelled';
-  statusDetails: string | null;
-  usage: null;
+  status: api_proto.Realtime_ResponseStatus;
+  statusDetails: api_proto.Realtime_ResponseStatusDetails | null;
+  usage: api_proto.Realtime_ModelUsage | null;
   output: RealtimeOutput[];
   doneFut: Future;
   createdTimestamp: number;
@@ -40,7 +48,7 @@ export interface RealtimeOutput {
   responseId: string;
   itemId: string;
   outputIndex: number;
-  role: 'user' | 'assistant' | 'system';
+  role: api_proto.Realtime_Role;
   type: 'message' | 'function_call';
   content: RealtimeContent[];
   doneFut: Future;
@@ -56,7 +64,7 @@ export interface RealtimeContent {
   textStream: AsyncIterableQueue<string>;
   audioStream: AsyncIterableQueue<AudioFrame>;
   toolCalls: RealtimeToolCall[];
-  contentType: 'text' | 'audio';
+  contentType: api_proto.Realtime_Modality;
 }
 
 export interface RealtimeToolCall {
@@ -81,6 +89,12 @@ export interface InputSpeechStarted {
 
 export interface InputSpeechCommitted {
   itemId: string;
+}
+
+interface ContentPtr {
+  response_id: string;
+  output_index: number;
+  content_index: number;
 }
 
 class InputAudioBuffer {
@@ -166,15 +180,14 @@ class Response {
 }
 
 export class RealtimeModel extends multimodal.RealtimeModel {
-  sampleRate = ultravox_proto.SAMPLE_RATE;
-  numChannels = ultravox_proto.NUM_CHANNELS;
-  inFrameSize = ultravox_proto.IN_FRAME_SIZE;
-  outFrameSize = ultravox_proto.OUT_FRAME_SIZE;
+  sampleRate = api_proto.SAMPLE_RATE;
+  numChannels = api_proto.NUM_CHANNELS;
+  inFrameSize = api_proto.IN_FRAME_SIZE;
+  outFrameSize = api_proto.OUT_FRAME_SIZE;
 
   #defaultOpts: ModelOptions;
   #sessions: RealtimeSession[] = [];
   #client: UltravoxClient;
-
   constructor({
     modalities = ['text', 'audio'],
     instructions = '',
@@ -193,12 +206,12 @@ export class RealtimeModel extends multimodal.RealtimeModel {
   }: {
     modalities?: ['text', 'audio'] | ['text'];
     instructions?: string;
-    voice?: ultravox_proto.Voice;
-    inputAudioFormat?: ultravox_proto.AudioFormat;
-    outputAudioFormat?: ultravox_proto.AudioFormat;
+    voice?: api_proto.Voice;
+    inputAudioFormat?: api_proto.AudioFormat;
+    outputAudioFormat?: api_proto.AudioFormat;
     temperature?: number;
     maxResponseOutputTokens?: number;
-    model?: ultravox_proto.Model;
+    model?: api_proto.Model;
     apiKey?: string;
     baseURL?: string;
     maxDuration?: string;
@@ -253,9 +266,9 @@ export class RealtimeModel extends multimodal.RealtimeModel {
     chatCtx?: llm.ChatContext;
     modalities?: ['text', 'audio'] | ['text'];
     instructions?: string;
-    voice?: ultravox_proto.Voice;
-    inputAudioFormat?: ultravox_proto.AudioFormat;
-    outputAudioFormat?: ultravox_proto.AudioFormat;
+    voice?: api_proto.Voice;
+    inputAudioFormat?: api_proto.AudioFormat;
+    outputAudioFormat?: api_proto.AudioFormat;
     temperature?: number;
     maxResponseOutputTokens?: number;
   }): RealtimeSession {
@@ -303,6 +316,10 @@ export class RealtimeSession extends multimodal.RealtimeSession {
   #closing = true;
   #sendQueue = new Queue<any>();
   #callId: string | null = null;
+  #currentResponseId: string | null = null;
+  #currentOutputIndex = 0;
+  #currentContentIndex = 0;
+  #audioStream: AudioByteStream;
 
   constructor(
     opts: ModelOptions,
@@ -313,9 +330,13 @@ export class RealtimeSession extends multimodal.RealtimeSession {
 
     this.#opts = opts;
     this.#client = client;
-    this.#chatCtx = chatCtx;
     this.#fncCtx = fncCtx;
-
+    this.#chatCtx = chatCtx;
+    this.#audioStream = new AudioByteStream(
+      api_proto.SAMPLE_RATE,
+      api_proto.NUM_CHANNELS,
+      api_proto.OUT_FRAME_SIZE,
+    );
     this.#task = this.#start();
   }
 
@@ -361,11 +382,23 @@ export class RealtimeSession extends multimodal.RealtimeSession {
     }
   }
 
+  #getContent(ptr: ContentPtr): RealtimeContent {
+    const response = this.#pendingResponses[ptr.response_id];
+    const output = response!.output[ptr.output_index];
+    const content = output!.content[ptr.content_index]!;
+    console.log('getContent', { ptr, response, output, content });
+    return content;
+  }
+
+  #generateEventId(): string {
+    return `ultravox-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
+
   #start(): Promise<void> {
     return new Promise(async (resolve, reject) => {
       try {
         // Create Ultravox call
-        const modelData: ultravox_proto.UltravoxModelData = {
+        const modelData: api_proto.UltravoxModelData = {
           model: this.#opts.model,
           maxDuration: this.#opts.maxDuration,
           timeExceededMessage: this.#opts.timeExceededMessage,
@@ -408,13 +441,44 @@ export class RealtimeSession extends multimodal.RealtimeSession {
         this.#sessionId = this.#callId;
         this.#expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
 
+        // Emit session created event (OpenAI format)
+        this.emit('session_created', {
+          event_id: this.#generateEventId(),
+          type: 'session.created',
+          session: {
+            id: this.#sessionId,
+            object: 'realtime.session',
+            model: this.#opts.model,
+            modalities: this.#opts.modalities,
+            instructions: this.#opts.instructions,
+            voice: this.#opts.voice || 'alloy',
+            input_audio_format: this.#opts.inputAudioFormat,
+            output_audio_format: this.#opts.outputAudioFormat,
+            input_audio_transcription: null,
+            turn_detection: null,
+            tools: [],
+            tool_choice: 'auto',
+            temperature: this.#opts.temperature,
+            max_response_output_tokens:
+              this.#opts.maxResponseOutputTokens === Infinity
+                ? 'inf'
+                : this.#opts.maxResponseOutputTokens,
+            expires_at: this.#expiresAt,
+          },
+        } as api_proto.Realtime_SessionCreatedEvent);
+
         this.#ws.onmessage = (message) => {
+          console.log('onmessage', {
+            data: message.data,
+            type: message.type,
+            to: typeof message.data,
+          });
           try {
             if (message.data instanceof Buffer) {
               this.#handleAudio(message.data);
             } else {
-              const event: ultravox_proto.UltravoxMessage = JSON.parse(message.data as string);
-              this.#logger.debug(`<- ${JSON.stringify(event)}`);
+              const event: api_proto.UltravoxMessage = JSON.parse(message.data as string);
+              console.debug(`<- ${JSON.stringify(event)}`);
               this.#handleMessage(event);
             }
           } catch (error) {
@@ -469,13 +533,13 @@ export class RealtimeSession extends multimodal.RealtimeSession {
     await this.#task;
   }
 
-  #handleMessage(event: ultravox_proto.UltravoxMessage): void {
+  #handleMessage(event: api_proto.UltravoxMessage): void {
     switch (event.type) {
-      case 'status':
+      case 'state':
         this.#handleStatus(event);
         break;
-      case 'transcripts':
-        this.#handleTranscripts(event);
+      case 'transcript':
+        this.#handleTranscript(event);
         break;
       case 'experimental_message':
         this.#handleExperimentalMessage(event);
@@ -485,25 +549,167 @@ export class RealtimeSession extends multimodal.RealtimeSession {
     }
   }
 
-  #handleStatus(event: ultravox_proto.UltravoxStatusMessage): void {
-    this.#logger.debug('Status:', event.status);
-  }
+  #handleStatus(event: api_proto.UltravoxStatusMessage): void {
+    this.#logger.debug('Status:', event.state);
 
-  #handleTranscripts(event: ultravox_proto.UltravoxTranscriptMessage): void {
-    for (const transcript of event.transcripts) {
-      if (transcript.speaker === 'user') {
-        this.emit('input_speech_transcription_completed', {
-          itemId: 'user-transcript',
-          transcript: transcript.text,
-        } as InputSpeechTranscriptionCompleted);
-      } else if (transcript.speaker === 'agent') {
-        // Handle agent transcript
-        this.#logger.debug('Agent transcript:', transcript.text);
+    // Map Ultravox status to OpenAI events
+    if (event.state === 'listening') {
+      // Emit input speech started
+      this.emit('input_speech_started', {
+        itemId: 'ultravox-user-input',
+      } as InputSpeechStarted);
+    } else if (event.state === 'thinking') {
+      this.#currentResponseId = null;
+    } else if (event.state === 'speaking') {
+      // Create a response if we don't have one
+      if (!this.#currentResponseId) {
+        this.#currentResponseId = this.#generateEventId();
+        const response: RealtimeResponse = {
+          id: this.#currentResponseId,
+          status: 'in_progress',
+          statusDetails: null,
+          usage: null,
+          output: [],
+          doneFut: new Future(),
+          createdTimestamp: Date.now(),
+        };
+        this.#pendingResponses[this.#currentResponseId] = response;
+
+        // Emit response created event
+        this.emit('response_created', {
+          event_id: this.#generateEventId(),
+          type: 'response.created',
+          response: {
+            id: this.#currentResponseId,
+            object: 'realtime.response',
+            status: 'in_progress',
+            output: [],
+          },
+        } as api_proto.Realtime_ResponseCreatedEvent);
+
+        // Emit response output added for audio content
+        if (this.#currentResponseId) {
+          const output: RealtimeOutput = {
+            responseId: this.#currentResponseId,
+            itemId: `output-${this.#currentOutputIndex}`,
+            outputIndex: this.#currentOutputIndex,
+            role: 'assistant',
+            type: 'message',
+            content: [],
+            doneFut: new Future(),
+          };
+
+          const response = this.#pendingResponses[this.#currentResponseId];
+          if (response) {
+            response.output.push(output);
+          }
+
+          // Emit response output added event
+          this.emit('response_output_added', output);
+
+          // Add audio content
+          const content: RealtimeContent = {
+            responseId: this.#currentResponseId,
+            itemId: output.itemId,
+            outputIndex: this.#currentOutputIndex,
+            contentIndex: this.#currentContentIndex,
+            text: '',
+            audio: [],
+            textStream: new AsyncIterableQueue<string>(),
+            audioStream: new AsyncIterableQueue<AudioFrame>(),
+            toolCalls: [],
+            contentType: 'audio',
+          };
+
+          output.content.push(content);
+          response!.firstTokenTimestamp = Date.now();
+          this.emit('response_content_added', content);
+        }
       }
     }
   }
 
-  #handleExperimentalMessage(event: ultravox_proto.UltravoxExperimentalMessage): void {
+  #handleTranscript(event: api_proto.UltravoxTranscriptMessage): void {
+    for (const transcript of event.transcripts) {
+      if (transcript.speaker === 'user') {
+        // Emit input speech transcription completed
+        this.emit('input_speech_transcription_completed', {
+          itemId: 'ultravox-user-transcript',
+          transcript: transcript.text,
+        } as InputSpeechTranscriptionCompleted);
+
+        // Emit input audio buffer committed
+        this.emit('input_speech_committed', {
+          itemId: 'ultravox-user-input',
+        } as InputSpeechCommitted);
+      } else if (transcript.speaker === 'agent') {
+        // Handle agent transcript - emit text delta events
+        if (this.#currentResponseId && transcript.final) {
+          // Emit text done event
+          this.emit('response_text_done', {
+            event_id: this.#generateEventId(),
+            type: 'response.text.done',
+            response_id: this.#currentResponseId,
+            output_index: this.#currentOutputIndex,
+            content_index: this.#currentContentIndex,
+            text: transcript.text,
+          } as api_proto.Realtime_ResponseTextDoneEvent);
+
+          // Emit content part done
+          this.emit('response_content_done', {
+            event_id: this.#generateEventId(),
+            type: 'response.content_part.done',
+            response_id: this.#currentResponseId,
+            output_index: this.#currentOutputIndex,
+            content_index: this.#currentContentIndex,
+            part: {
+              type: 'text',
+            },
+          } as api_proto.Realtime_ResponseContentPartDoneEvent);
+
+          // Emit output item done
+          this.emit('response_output_done', {
+            event_id: this.#generateEventId(),
+            type: 'response.output_item.done',
+            response_id: this.#currentResponseId,
+            output_index: this.#currentOutputIndex,
+            item: {
+              id: `output-${this.#currentOutputIndex}`,
+              object: 'realtime.item',
+              type: 'message',
+              role: 'assistant',
+              content: [
+                {
+                  type: 'text',
+                  text: transcript.text,
+                },
+              ],
+            },
+          } as api_proto.Realtime_ResponseOutputItemDoneEvent);
+
+          // Emit response done
+          this.emit('response_done', {
+            event_id: this.#generateEventId(),
+            type: 'response.done',
+            response: {
+              id: this.#currentResponseId,
+              object: 'realtime.response',
+              status: 'completed',
+              status_details: { type: 'incomplete', reason: 'max_output_tokens' },
+              output: [],
+            },
+          } as api_proto.Realtime_ResponseDoneEvent);
+
+          // Reset for next response
+          this.#currentResponseId = null;
+          this.#currentOutputIndex = 0;
+          this.#currentContentIndex = 0;
+        }
+      }
+    }
+  }
+
+  #handleExperimentalMessage(event: api_proto.UltravoxExperimentalMessage): void {
     const message = event.message;
     if (message.type === 'debug' && message.message.startsWith('LLM response:')) {
       // Handle LLM response
@@ -512,42 +718,42 @@ export class RealtimeSession extends multimodal.RealtimeSession {
   }
 
   async #handleAudio(audioData: Buffer): Promise<void> {
-    // Handle incoming audio from Ultravox
-    console.log(
-      {
-        audioData,
-        length: audioData.length,
-        sampleRate: ultravox_proto.SAMPLE_RATE,
-        numChannels: ultravox_proto.NUM_CHANNELS,
-      },
-      'audioData',
-    );
-    new AudioFrame(
-      new Int16Array(audioData),
-      ultravox_proto.SAMPLE_RATE,
-      ultravox_proto.NUM_CHANNELS,
-      audioData.length / 2,
-    );
+    if (!this.#currentResponseId) {
+      console.debug('No current response id, skipping audio', {
+        currentResponseId: this.#currentResponseId,
+      });
+      return;
+    }
 
-    // Emit audio event
-    this.emit('response_audio_delta', {
-      response_id: 'ultravox-response',
-      output_index: 0,
-      content_index: 0,
-      delta: audioData,
+    const content = this.#getContent({
+      response_id: this.#currentResponseId,
+      output_index: this.#currentOutputIndex,
+      content_index: this.#currentContentIndex,
     });
+
+    console.debug('Received audio from Ultravox', {
+      audioDataLength: audioData.length,
+      int16Length: audioData.length / Int16Array.BYTES_PER_ELEMENT,
+    });
+
+    const frames = this.#audioStream.write(audioData);
+    frames.forEach((frame: AudioFrame) => {
+      content.audio.push(frame);
+      content.audioStream.put(frame);
+    });
+
   }
 
   /** Create an empty audio message with the given duration. */
   #createEmptyUserAudioMessage(duration: number): llm.ChatMessage {
-    const samples = duration * ultravox_proto.SAMPLE_RATE;
+    const samples = duration * api_proto.SAMPLE_RATE;
     return new llm.ChatMessage({
       role: llm.ChatRole.USER,
       content: {
         frame: new AudioFrame(
-          new Int16Array(samples * ultravox_proto.NUM_CHANNELS),
-          ultravox_proto.SAMPLE_RATE,
-          ultravox_proto.NUM_CHANNELS,
+          new Int16Array(samples * api_proto.NUM_CHANNELS),
+          api_proto.SAMPLE_RATE,
+          api_proto.NUM_CHANNELS,
           samples,
         ),
       },
