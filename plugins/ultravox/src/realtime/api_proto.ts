@@ -68,7 +68,13 @@ export interface UltravoxModelData {
 }
 
 // Ultravox WebSocket message types
-export type UltravoxMessageType = 'state' | 'transcript' | 'experimental_message' | 'audio';
+export type UltravoxMessageType =
+  | 'state'
+  | 'transcript'
+  | 'experimental_message'
+  | 'audio'
+  | 'client_tool_invocation'
+  | 'client_tool_result';
 
 export interface UltravoxStatusMessage {
   type: 'state';
@@ -98,11 +104,30 @@ export interface UltravoxAudioMessage {
   audio: string; // base64 encoded audio data
 }
 
+export interface UltravoxFunctionCallMessage {
+  type: 'client_tool_invocation';
+  toolName: string;
+  parameters: string;
+  invocationId: string;
+}
+
+export interface UltravoxFunctionResultMessage {
+  type: 'client_tool_result';
+  invocationId: string;
+  agentReaction?: 'speaks' | 'listens' | 'speaks-once';
+  result?: string;
+  responseType?: 'tool-reponse' | 'tool-error';
+  errorType?: 'implementation-error' | undefined;
+  errorMessage?: string;
+}
+
 export type UltravoxMessage =
   | UltravoxStatusMessage
   | UltravoxTranscriptMessage
   | UltravoxExperimentalMessage
-  | UltravoxAudioMessage;
+  | UltravoxAudioMessage
+  | UltravoxFunctionCallMessage
+  | UltravoxFunctionResultMessage;
 
 // Ultravox API response types
 export interface UltravoxCallResponse {

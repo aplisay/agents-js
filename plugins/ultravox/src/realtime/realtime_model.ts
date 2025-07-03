@@ -111,12 +111,10 @@ class InputAudioBuffer {
 
   clear() {
     // Clear audio buffer - not needed for Ultravox
-
   }
 
   commit() {
     // Commit audio buffer - not needed for Ultravox
-
   }
 }
 
@@ -170,12 +168,10 @@ class Response {
 
   create() {
     // Not needed for Ultravox - responses are automatic
-    console.debug('Response create called');
   }
 
   cancel() {
     // Not supported in Ultravox
-    console.debug('Response cancel not supported in Ultravox');
   }
 }
 
@@ -385,8 +381,8 @@ export class RealtimeSession extends multimodal.RealtimeSession {
     },
   ): { response?: RealtimeResponse; output?: RealtimeOutput; content?: RealtimeContent } {
     const response = this.#pendingResponses[ptr.response_id];
-    const output = response!.output[ptr.output_index];
-    const content = output!.content[ptr.content_index]!;
+    const output = response?.output?.[ptr.output_index];
+    const content = output?.content?.[ptr.content_index];
     this.#logger.debug('getContent', { ptr });
     return { response, output, content };
   }
@@ -398,13 +394,45 @@ export class RealtimeSession extends multimodal.RealtimeSession {
   #start(): Promise<void> {
     return new Promise(async (resolve, reject) => {
       try {
+        // Convert function context to Ultravox tools
+        const selectedTools: api_proto.UltravoxTool[] = [];
+        if (this.#fncCtx) {
+          for (const [name, func] of Object.entries(this.#fncCtx)) {
+            const tool: api_proto.UltravoxTool = {
+              nameOverride: name,
+              temporaryTool: {
+                description: func.description,
+                timeout: '30s',
+                client: {},
+                dynamicParameters: Object.entries(func.parameters.properties || {})
+                  .filter(
+                    ([, prop]) =>
+                      (prop as any).source !== 'static' && (prop as any).source !== 'metadata',
+                  )
+                  .map(([propName, prop]) => ({
+                    name: propName,
+                    location: 'PARAMETER_LOCATION_BODY',
+                    schema: {
+                      type: (prop as any).type || 'string',
+                      description: (prop as any).description || '',
+                    },
+                    required: (func.parameters.required || []).includes(propName),
+                  })),
+                // We dont send static parameters here, sort them out later in the client call
+                staticParameters: [],
+              },
+            };
+            selectedTools.push(tool);
+          }
+        }
+
         // Create Ultravox call
         const modelData: api_proto.UltravoxModelData = {
           model: this.#opts.model,
           maxDuration: this.#opts.maxDuration,
           timeExceededMessage: this.#opts.timeExceededMessage,
           systemPrompt: this.#opts.instructions,
-          selectedTools: [], // TODO: Convert functions to Ultravox tools
+          selectedTools,
           temperature: this.#opts.temperature,
           voice: this.#opts.voice,
           transcriptOptional: this.#opts.transcriptOptional,
@@ -417,7 +445,7 @@ export class RealtimeSession extends multimodal.RealtimeSession {
           },
           firstSpeaker: this.#opts.firstSpeaker,
         };
-        console.log({ modelData }, 'modelData');
+
         this.#logger.debug({ modelData }, 'Creating Ultravox call');
         const callResponse = await this.#client.createCall(modelData);
         this.#callId = callResponse.callId;
@@ -469,19 +497,12 @@ export class RealtimeSession extends multimodal.RealtimeSession {
         } as api_proto.Realtime_SessionCreatedEvent);
 
         this.#ws.onmessage = (message) => {
-          try {
-            if (message.data instanceof Buffer) {
-              this.#handleAudio(message.data);
-            } else {
-              const event: api_proto.UltravoxMessage = JSON.parse(message.data as string);
-              console.debug(`<- ${JSON.stringify(event)}`);
-              this.#handleMessage(event);
-            }
-          } catch (error) {
-            let message;
-            if (error instanceof Error) message = error.message;
-            else message = String(error);
-            this.#logger.error('Error parsing message:', message, error);
+          if (message.data instanceof Buffer) {
+            this.#handleAudio(message.data);
+          } else {
+            const event: api_proto.UltravoxMessage = JSON.parse(message.data as string);
+
+            this.#handleMessage(event);
           }
         };
 
@@ -537,6 +558,9 @@ export class RealtimeSession extends multimodal.RealtimeSession {
       case 'transcript':
         this.#handleTranscript(event);
         break;
+      case 'client_tool_invocation':
+        this.#handleFunctionCall(event);
+        break;
       case 'experimental_message':
         this.#handleExperimentalMessage(event);
         break;
@@ -556,7 +580,6 @@ export class RealtimeSession extends multimodal.RealtimeSession {
         itemId: 'ultravox-user-input',
       } as InputSpeechStarted);
     } else if (event.state === 'thinking') {
-      this.#endResponse();
     } else if (event.state === 'speaking') {
       // If we have just moved into the speaking state, we need to create a new response
       // and create a new audio byte stream for the response. If we are already in the speaking state,
@@ -680,7 +703,94 @@ export class RealtimeSession extends multimodal.RealtimeSession {
     this.#currentResponseId = null;
     this.#currentOutputIndex = 0;
     this.#currentContentIndex = 0;
-    console.log('cleared the response', { responseId: this.#currentResponseId });
+  }
+
+  #handleFunctionCall(event: api_proto.UltravoxFunctionCallMessage): void {
+    this.#logger.debug('Function call received:', { event });
+
+    if (!this.#fncCtx) {
+      this.#logger.error('function call received but no fncCtx is available');
+      return;
+    }
+
+    // parse the arguments and call the function inside the fnc_ctx
+    const func = this.#fncCtx[event.toolName];
+    if (!func) {
+      this.#logger.error(`no function with name ${event.toolName} in fncCtx`);
+      return;
+    }
+    this.emit('function_call_started', {
+      callId: event.invocationId,
+    });
+
+    this.#logger.debug(
+      `[Function Call ${event.invocationId}] Executing ${event.toolName} with arguments ${event.parameters}`,
+    );
+
+    // Create function call tool
+    const toolCall: RealtimeToolCall = {
+      name: event.toolName,
+      arguments: event.parameters,
+      toolCallID: event.invocationId,
+    };
+
+    // Emit function call arguments done event
+    this.emit('response_function_call_arguments_done', toolCall);
+
+    this.#executeFunction(toolCall).then(() => {
+      this.emit('function_call_completed', {
+        callId: toolCall.toolCallID,
+      });
+    });
+  }
+
+  async #executeFunction(toolCall: RealtimeToolCall): Promise<void> {
+    if (!this.#fncCtx) {
+      this.#logger.warn('No function context available');
+      return;
+    }
+
+    const func = this.#fncCtx[toolCall.name];
+    if (!func) {
+      this.#logger.error(`No function with name ${toolCall.name} in function context`);
+      return;
+    }
+
+    try {
+      this.#logger.debug('Executing function:', toolCall.name);
+
+      const result = await func.execute(toolCall.arguments);
+
+      // Send function result back to Ultravox
+      if (this.#ws && this.#ws.readyState === WebSocket.OPEN) {
+        const functionResult: api_proto.UltravoxFunctionResultMessage = {
+          type: 'client_tool_result',
+          invocationId: toolCall.toolCallID,
+          result: JSON.stringify(result),
+        };
+
+        this.#logger.debug('Sending function result:', functionResult);
+        this.#ws.send(JSON.stringify(functionResult));
+      }
+    } catch (error: unknown) {
+      this.#logger.error(
+        'Error executing function:',
+        error instanceof Error ? error.message : String(error),
+      );
+
+      // Send error result back to Ultravox
+      if (this.#ws && this.#ws.readyState === WebSocket.OPEN) {
+        const functionResult: api_proto.UltravoxFunctionResultMessage = {
+          type: 'client_tool_result',
+          invocationId: toolCall.toolCallID,
+          errorType: 'implementation-error',
+          errorMessage: error instanceof Error ? error.message : String(error),
+        };
+
+        this.#logger.debug('Sending function error result:', functionResult);
+        this.#ws.send(JSON.stringify(functionResult));
+      }
+    }
   }
 
   #handleExperimentalMessage(event: api_proto.UltravoxExperimentalMessage): void {
