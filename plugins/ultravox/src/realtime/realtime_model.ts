@@ -111,12 +111,12 @@ class InputAudioBuffer {
 
   clear() {
     // Clear audio buffer - not needed for Ultravox
-    console.debug('Audio buffer cleared');
+
   }
 
   commit() {
     // Commit audio buffer - not needed for Ultravox
-    console.debug('Audio buffer committed');
+
   }
 }
 
@@ -319,7 +319,7 @@ export class RealtimeSession extends multimodal.RealtimeSession {
   #currentResponseId: string | null = null;
   #currentOutputIndex = 0;
   #currentContentIndex = 0;
-  #audioStream: AudioByteStream;
+  #audioStream?: AudioByteStream;
 
   constructor(
     opts: ModelOptions,
@@ -332,11 +332,6 @@ export class RealtimeSession extends multimodal.RealtimeSession {
     this.#client = client;
     this.#fncCtx = fncCtx;
     this.#chatCtx = chatCtx;
-    this.#audioStream = new AudioByteStream(
-      api_proto.SAMPLE_RATE,
-      api_proto.NUM_CHANNELS,
-      api_proto.OUT_FRAME_SIZE,
-    );
     this.#task = this.#start();
   }
 
@@ -382,12 +377,18 @@ export class RealtimeSession extends multimodal.RealtimeSession {
     }
   }
 
-  #getContent(ptr: ContentPtr): RealtimeContent {
+  #getContent(
+    ptr: ContentPtr = {
+      response_id: this.#currentResponseId || '',
+      output_index: this.#currentOutputIndex,
+      content_index: this.#currentContentIndex,
+    },
+  ): { response?: RealtimeResponse; output?: RealtimeOutput; content?: RealtimeContent } {
     const response = this.#pendingResponses[ptr.response_id];
     const output = response!.output[ptr.output_index];
     const content = output!.content[ptr.content_index]!;
-    console.log('getContent', { ptr, response, output, content });
-    return content;
+    this.#logger.debug('getContent', { ptr });
+    return { response, output, content };
   }
 
   #generateEventId(): string {
@@ -468,11 +469,6 @@ export class RealtimeSession extends multimodal.RealtimeSession {
         } as api_proto.Realtime_SessionCreatedEvent);
 
         this.#ws.onmessage = (message) => {
-          console.log('onmessage', {
-            data: message.data,
-            type: message.type,
-            to: typeof message.data,
-          });
           try {
             if (message.data instanceof Buffer) {
               this.#handleAudio(message.data);
@@ -554,16 +550,27 @@ export class RealtimeSession extends multimodal.RealtimeSession {
 
     // Map Ultravox status to OpenAI events
     if (event.state === 'listening') {
+      this.#endResponse();
       // Emit input speech started
       this.emit('input_speech_started', {
         itemId: 'ultravox-user-input',
       } as InputSpeechStarted);
     } else if (event.state === 'thinking') {
-      this.#currentResponseId = null;
+      this.#endResponse();
     } else if (event.state === 'speaking') {
-      // Create a response if we don't have one
+      // If we have just moved into the speaking state, we need to create a new response
+      // and create a new audio byte stream for the response. If we are already in the speaking state,
+      // then nothing needs to be done.
       if (!this.#currentResponseId) {
         this.#currentResponseId = this.#generateEventId();
+        this.#logger.debug('Creating new response', { responseId: this.#currentResponseId });
+        // Create a new audio byte stream for the response
+        this.#audioStream = new AudioByteStream(
+          api_proto.SAMPLE_RATE,
+          api_proto.NUM_CHANNELS,
+          api_proto.OUT_FRAME_SIZE,
+        );
+
         const response: RealtimeResponse = {
           id: this.#currentResponseId,
           status: 'in_progress',
@@ -576,16 +583,7 @@ export class RealtimeSession extends multimodal.RealtimeSession {
         this.#pendingResponses[this.#currentResponseId] = response;
 
         // Emit response created event
-        this.emit('response_created', {
-          event_id: this.#generateEventId(),
-          type: 'response.created',
-          response: {
-            id: this.#currentResponseId,
-            object: 'realtime.response',
-            status: 'in_progress',
-            output: [],
-          },
-        } as api_proto.Realtime_ResponseCreatedEvent);
+        this.emit('response_created', response);
 
         // Emit response output added for audio content
         if (this.#currentResponseId) {
@@ -630,83 +628,59 @@ export class RealtimeSession extends multimodal.RealtimeSession {
   }
 
   #handleTranscript(event: api_proto.UltravoxTranscriptMessage): void {
-    for (const transcript of event.transcripts) {
-      if (transcript.speaker === 'user') {
-        // Emit input speech transcription completed
+    this.#logger.debug('handleTranscript', { event, responseId: this.#currentResponseId });
+    const { output, content, response } = this.#getContent();
+    if (event.role === 'user' && response) {
+      // Emit input speech transcription completed
+      if (event.final) {
         this.emit('input_speech_transcription_completed', {
           itemId: 'ultravox-user-transcript',
-          transcript: transcript.text,
+          transcript: event.text,
         } as InputSpeechTranscriptionCompleted);
-
-        // Emit input audio buffer committed
-        this.emit('input_speech_committed', {
-          itemId: 'ultravox-user-input',
-        } as InputSpeechCommitted);
-      } else if (transcript.speaker === 'agent') {
-        // Handle agent transcript - emit text delta events
-        if (this.#currentResponseId && transcript.final) {
-          // Emit text done event
-          this.emit('response_text_done', {
-            event_id: this.#generateEventId(),
-            type: 'response.text.done',
-            response_id: this.#currentResponseId,
-            output_index: this.#currentOutputIndex,
-            content_index: this.#currentContentIndex,
-            text: transcript.text,
-          } as api_proto.Realtime_ResponseTextDoneEvent);
-
-          // Emit content part done
-          this.emit('response_content_done', {
-            event_id: this.#generateEventId(),
-            type: 'response.content_part.done',
-            response_id: this.#currentResponseId,
-            output_index: this.#currentOutputIndex,
-            content_index: this.#currentContentIndex,
-            part: {
-              type: 'text',
-            },
-          } as api_proto.Realtime_ResponseContentPartDoneEvent);
-
-          // Emit output item done
-          this.emit('response_output_done', {
-            event_id: this.#generateEventId(),
-            type: 'response.output_item.done',
-            response_id: this.#currentResponseId,
-            output_index: this.#currentOutputIndex,
-            item: {
-              id: `output-${this.#currentOutputIndex}`,
-              object: 'realtime.item',
-              type: 'message',
-              role: 'assistant',
-              content: [
-                {
-                  type: 'text',
-                  text: transcript.text,
-                },
-              ],
-            },
-          } as api_proto.Realtime_ResponseOutputItemDoneEvent);
-
-          // Emit response done
-          this.emit('response_done', {
-            event_id: this.#generateEventId(),
-            type: 'response.done',
-            response: {
-              id: this.#currentResponseId,
-              object: 'realtime.response',
-              status: 'completed',
-              status_details: { type: 'incomplete', reason: 'max_output_tokens' },
-              output: [],
-            },
-          } as api_proto.Realtime_ResponseDoneEvent);
-
-          // Reset for next response
-          this.#currentResponseId = null;
-          this.#currentOutputIndex = 0;
-          this.#currentContentIndex = 0;
-        }
+      }
+      // Emit input audio buffer committed
+      this.emit('input_speech_committed', {
+        itemId: 'ultravox-user-input',
+      } as InputSpeechCommitted);
+    } else if (event.role === 'agent' && response && content && output) {
+      // Handle agent transcript - emit text delta events
+      if (!event.final) {
+        const transcript = event.delta;
+        content.text += transcript;
+        transcript && content.textStream.put(transcript);
+      } else {
+        content.text = event.text || '';
+        content.textStream.close();
+        this.#endResponse();
       }
     }
+  }
+
+  #endResponse() {
+    const { content, output, response } = this.#getContent();
+    if (!content || !output || !response) {
+      return;
+    }
+
+    content.textStream.close();
+    content.audioStream.close();
+
+    // Emit audio done event
+    this.emit('response_audio_done', content);
+    // Emit text done event
+    this.emit('response_text_done', content);
+    // Emit content part done
+    this.emit('response_content_done', content);
+    // Emit output item done
+    this.emit('response_output_done', output);
+    // Emit response done
+    this.emit('response_done', response);
+
+    // Reset for next response
+    this.#currentResponseId = null;
+    this.#currentOutputIndex = 0;
+    this.#currentContentIndex = 0;
+    console.log('cleared the response', { responseId: this.#currentResponseId });
   }
 
   #handleExperimentalMessage(event: api_proto.UltravoxExperimentalMessage): void {
@@ -719,29 +693,20 @@ export class RealtimeSession extends multimodal.RealtimeSession {
 
   async #handleAudio(audioData: Buffer): Promise<void> {
     if (!this.#currentResponseId) {
-      console.debug('No current response id, skipping audio', {
+      this.#logger.info('No current response id, skipping audio', {
         currentResponseId: this.#currentResponseId,
       });
       return;
     }
 
-    const content = this.#getContent({
-      response_id: this.#currentResponseId,
-      output_index: this.#currentOutputIndex,
-      content_index: this.#currentContentIndex,
-    });
+    const { content } = this.#getContent();
 
-    console.debug('Received audio from Ultravox', {
-      audioDataLength: audioData.length,
-      int16Length: audioData.length / Int16Array.BYTES_PER_ELEMENT,
-    });
-
-    const frames = this.#audioStream.write(audioData);
-    frames.forEach((frame: AudioFrame) => {
-      content.audio.push(frame);
-      content.audioStream.put(frame);
-    });
-
+    const frames = this.#audioStream?.write(audioData);
+    frames &&
+      frames.forEach((frame: AudioFrame) => {
+        content?.audio.push(frame);
+        content?.audioStream.put(frame);
+      });
   }
 
   /** Create an empty audio message with the given duration. */

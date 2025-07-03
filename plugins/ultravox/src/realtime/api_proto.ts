@@ -77,11 +77,12 @@ export interface UltravoxStatusMessage {
 
 export interface UltravoxTranscriptMessage {
   type: 'transcript';
-  transcripts: Array<{
-    speaker: string;
-    text: string;
-    final: boolean;
-  }>;
+  role: string;
+  text?: string;
+  medium: 'voice' | 'text';
+  delta?: string;
+  final: boolean;
+  ordinal?: number;
 }
 
 export interface UltravoxExperimentalMessage {
@@ -120,7 +121,6 @@ export interface UltravoxVoicesResponse {
 }
 
 // --- OpenAI protocol types for event compatibility ---
-
 
 export type Realtime_AudioFormat = 'pcm16';
 export type Realtime_Role = 'system' | 'assistant' | 'user' | 'tool';
