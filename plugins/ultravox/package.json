@@ -1,5 +1,5 @@
 {
-  "name": "@livekit/agents-plugin-ultravox",
+  "name": "@aplisay/agents-plugin-ultravox",
   "version": "0.0.1",
   "description": "Ultravox plugin for LiveKit Node Agents",
   "main": "dist/index.js",
