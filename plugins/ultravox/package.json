@@ -14,7 +14,7 @@
   },
   "author": "rjp44",
   "type": "module",
-  "repository": "git@github.com:livekit/agents-js.git",
+  "repository": "git@github.com:aplisay/agents-js.git",
   "license": "Apache-2.0",
   "files": [
     "dist",
