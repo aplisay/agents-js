@@ -537,6 +537,7 @@ export class RealtimeSession extends multimodal.RealtimeSession {
   }
 
   async close() {
+    this.#logger.info('closing call', { ws: this.#ws, call: this.#callId });
     if (!this.#ws) return;
     this.#closing = true;
     this.#ws.close();
