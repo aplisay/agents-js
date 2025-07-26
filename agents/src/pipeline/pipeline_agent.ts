@@ -18,6 +18,7 @@ import type { TypedEventEmitter as TypedEmitter } from '@livekit/typed-emitter';
 import { randomUUID } from 'node:crypto';
 import EventEmitter from 'node:events';
 import {
+  ATTRIBUTE_SEGMENT_ID,
   ATTRIBUTE_TRANSCRIPTION_FINAL,
   ATTRIBUTE_TRANSCRIPTION_TRACK_ID,
   TOPIC_TRANSCRIPTION,
@@ -28,8 +29,7 @@ import type {
   FunctionContext,
   LLM,
 } from '../llm/index.js';
-import { LLMEvent, LLMStream } from '../llm/index.js';
-import { ChatContext, ChatMessage, ChatRole } from '../llm/index.js';
+import { ChatContext, ChatMessage, ChatRole, LLMEvent, LLMStream } from '../llm/index.js';
 import { log } from '../log.js';
 import type { AgentMetrics, PipelineEOUMetrics } from '../metrics/base.js';
 import { type STT, StreamAdapter as STTStreamAdapter, SpeechEventType } from '../stt/index.js';
@@ -52,6 +52,7 @@ import { SpeechHandle } from './speech_handle.js';
 
 export type AgentState = 'initializing' | 'thinking' | 'listening' | 'speaking';
 export const AGENT_STATE_ATTRIBUTE = 'lk.agent.state';
+let lastSpeechData: { sequenceId: string } | undefined;
 let speechData: { sequenceId: string } | undefined;
 
 export type BeforeLLMCallback = (
@@ -368,8 +369,10 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
     });
 
     this.#llm.on(LLMEvent.METRICS_COLLECTED, (metrics) => {
-      if (!speechData) return;
-      this.emit(VPAEvent.METRICS_COLLECTED, { ...metrics, sequenceId: speechData.sequenceId });
+      const sequenceId = speechData ? speechData.sequenceId : lastSpeechData?.sequenceId;
+      if (!sequenceId) return;
+
+      this.emit(VPAEvent.METRICS_COLLECTED, { ...metrics, sequenceId });
     });
 
     this.#vad.on(VADEventType.METRICS_COLLECTED, (metrics) => {
@@ -535,6 +538,7 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
         this.#transcribedInterimText,
         false,
         this.#transcriptionId,
+        this.#transcriptionId,
       );
     });
     this.#humanInput.on(HumanInputEvent.FINAL_TRANSCRIPT, async (event) => {
@@ -553,6 +557,7 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
         this.#humanInput!.subscribedTrack!.sid!,
         this.transcribedText,
         true,
+        this.#transcriptionId,
         this.#transcriptionId,
       );
 
@@ -689,6 +694,7 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
         const synthesisHandle = this.#synthesizeAgentSpeech(handle!.id, llmStream);
         handle!.initialize(llmStream, synthesisHandle);
       } finally {
+        lastSpeechData = speechData;
         speechData = undefined;
       }
       resolve();
@@ -892,6 +898,7 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
     text: string,
     isFinal: boolean,
     id: string,
+    segmentId: string,
   ) {
     this.#room!.localParticipant!.publishTranscription({
       participantIdentity: participantIdentity,
@@ -913,6 +920,7 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
       attributes: {
         [ATTRIBUTE_TRANSCRIPTION_TRACK_ID]: trackSid,
         [ATTRIBUTE_TRANSCRIPTION_FINAL]: isFinal.toString(),
+        [ATTRIBUTE_SEGMENT_ID]: segmentId,
       },
     });
     await stream.write(text);
@@ -927,13 +935,20 @@ export class VoicePipelineAgent extends (EventEmitter as new () => TypedEmitter<
     // TODO: where possible we would want to use deltas instead of full text segments, esp for LLM streams over the streamText API
     synchronizer.on('textUpdated', async (text) => {
       this.#agentTranscribedText = text.text;
+      if (!this.#transcriptionId) {
+        this.#transcriptionId = randomUUID();
+      }
       await this.#publishTranscription(
         this.#room!.localParticipant!.identity!,
         this.#agentPublication?.sid ?? '',
         text.text,
         text.final,
         text.id,
+        this.#transcriptionId,
       );
+      if (text.final) {
+        this.#transcriptionId = undefined;
+      }
     });
 
     if (!this.#agentOutput) {

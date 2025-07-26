@@ -1,18 +1,18 @@
 {
-  "name": "@livekit/agents-plugin-elevenlabs",
-  "version": "0.6.3",
-  "description": "ElevenLabs plugin for LiveKit Node Agents",
+  "name": "@livekit/agents-plugin-assemblyai",
+  "version": "0.0.0",
+  "description": "AssemblyAI plugin for LiveKit Agents for Node.js",
   "main": "dist/index.js",
   "require": "dist/index.cjs",
   "types": "dist/index.d.ts",
   "exports": {
     "import": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    },
-    "require": {
-      "types": "./dist/index.d.cts",
-      "default": "./dist/index.cjs"
+       "types": "./dist/index.d.ts",
+       "default": "./dist/index.js"
+     },
+     "require": {
+       "types": "./dist/index.d.cts",
+       "default": "./dist/index.cjs"
     }
   },
   "author": "LiveKit",
@@ -35,19 +35,18 @@
   },
   "devDependencies": {
     "@livekit/agents": "workspace:^x",
-    "@livekit/agents-plugin-openai": "workspace:^x",
+    "@livekit/agents-plugin-silero": "workspace:^x",
     "@livekit/agents-plugins-test": "workspace:^x",
-    "@livekit/rtc-node": "^0.13.11",
+    "@livekit/rtc-node": "^0.13.4",
     "@microsoft/api-extractor": "^7.35.0",
-    "@types/ws": "^8.5.10",
     "tsup": "^8.3.5",
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "ws": "^8.16.0"
+    "assemblyai": "^4.9.0"
   },
   "peerDependencies": {
     "@livekit/agents": "workspace:^x",
-    "@livekit/rtc-node": "^0.13.11"
+    "@livekit/rtc-node": "^0.13.4"
   }
 }
